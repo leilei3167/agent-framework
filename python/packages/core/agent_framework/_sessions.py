@@ -836,6 +836,7 @@ def _is_approval_placeholder_result(content: Content) -> bool:
 
 def _approval_controls_to_keep(messages: Sequence[Message]) -> set[int]:
     unresolved_requests_by_id: dict[str, Content] = {}
+    local_request_ids_by_call_id: dict[str, deque[str]] = {}
     unresolved_local_responses_by_id: dict[str, Content] = {}
     local_response_ids_by_call_id: dict[str, deque[str]] = {}
 
@@ -844,7 +845,12 @@ def _approval_controls_to_keep(messages: Sequence[Message]) -> set[int]:
             if content.type == "function_approval_request":
                 function_call = content.function_call
                 if content.id is not None and function_call is not None and function_call.call_id is not None:
-                    unresolved_requests_by_id.setdefault(content.id, content)
+                    if content.id not in unresolved_requests_by_id:
+                        unresolved_requests_by_id[content.id] = content
+                        local_request_ids_by_call_id.setdefault(function_call.call_id, deque()).append(content.id)
+                    # A replacement request supersedes the decision that triggered
+                    # reapproval; that old decision is no longer executable authority.
+                    unresolved_local_responses_by_id.pop(content.id, None)
                 continue
             if content.type == "function_approval_response":
                 function_call = content.function_call
@@ -870,7 +876,15 @@ def _approval_controls_to_keep(messages: Sequence[Message]) -> set[int]:
             if not (is_terminal_result or is_follow_up_request):
                 continue
             if response_ids := local_response_ids_by_call_id.get(content.call_id):
-                unresolved_local_responses_by_id.pop(response_ids.popleft(), None)
+                while response_ids and response_ids[0] not in unresolved_local_responses_by_id:
+                    response_ids.popleft()
+                if response_ids:
+                    unresolved_local_responses_by_id.pop(response_ids.popleft(), None)
+            if request_ids := local_request_ids_by_call_id.get(content.call_id):
+                while request_ids and request_ids[0] not in unresolved_requests_by_id:
+                    request_ids.popleft()
+                if request_ids:
+                    unresolved_requests_by_id.pop(request_ids.popleft(), None)
 
     return {
         id(content) for content in (*unresolved_requests_by_id.values(), *unresolved_local_responses_by_id.values())
